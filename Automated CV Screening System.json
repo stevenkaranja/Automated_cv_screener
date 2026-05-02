@@ -1,0 +1,493 @@
+{
+  "name": "Automated CV Screening System",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Submit CV",
+        "formDescription": "Submit your CV here",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "First Name",
+              "fieldLabel": "First Name",
+              "requiredField": true
+            },
+            {
+              "fieldName": "Surname",
+              "fieldLabel": "Last Name",
+              "requiredField": true
+            },
+            {
+              "fieldName": "Email",
+              "fieldLabel": "Email",
+              "fieldType": "email",
+              "requiredField": true
+            },
+            {
+              "fieldName": "CV Upload",
+              "fieldLabel": "Resume / CV (Please upload your CV as a PDF or Docx)",
+              "fieldType": "file",
+              "multipleFiles": false,
+              "acceptFileTypes": ".pdf, .docx",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "buttonLabel": "Submit"
+        }
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.4,
+      "position": [
+        0,
+        -368
+      ],
+      "id": "ffb87ab3-ba11-40cc-bb50-162f3d8771e9",
+      "name": "CV Submission Form",
+      "webhookId": "20f13ae4-4fe2-470a-a93c-ba70bb648702",
+      "notesInFlow": false,
+      "notes": "This form is the single entry point for the workflow.\nKey decisions:\n• Required fields enforce minimum viable candidate data (name + email).\n• File input is restricted to PDF and DOCX to reduce OCR errors downstream.\n• Additional validation is handled server-side to avoid relying solely on frontend controls."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Guard against missing or malformed file input from the form\nconst binaryData = items[0].binary;\nconst fileKey = \"CV_Upload\";\n\nif (!binaryData || !binaryData[fileKey]) {\n  throw new Error(\"No CV file uploaded\");\n}\n\nconst file = binaryData[fileKey];\n\nconst allowedTypes = {\n  \"application/pdf\": \"pdf\",\n  \"application/vnd.openxmlformats-officedocument.wordprocessingml.document\": \"docx\",\n};\n\nif (!allowedTypes[file.mimeType]) {\n  throw new Error(\"Invalid file format. Only PDF and DOCX allowed.\");\n}\n\nconst maxSize = 5 * 1024 * 1024; // 5MB\nif (file.fileSize && file.fileSize > maxSize) {\n  throw new Error(\"File too large. Max size is 5MB.\");\n}\n\n// Validate and build candidate name from form fields\nconst firstName = items[0].json[\"First Name\"];\nconst surname = items[0].json[\"Surname\"];\n\nif (!firstName || !surname) {\n  throw new Error(\"First name or surname missing from form submission\");\n}\n\nconst fullName = `${firstName} ${surname}`;\n\n// Build a predictable storage path for Supabase\nconst extension = allowedTypes[file.mimeType];\nconst datePrefix = new Date().toISOString().split(\"T\")[0];\n\n// Normalize name for filesystem safety\nconst safeName = fullName\n  .trim()\n  .replace(/\\s+/g, \"_\")\n  .replace(/[^a-zA-Z0-9_]/g, \"\");\n\nitems[0].json.full_name = fullName;\nitems[0].json.storage_path = `${datePrefix}/${safeName}_CV.${extension}`;\n\nreturn items;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -368
+      ],
+      "id": "7ae3e608-c246-4078-87d2-1aa4a9febe95",
+      "name": "CV Validation",
+      "notesInFlow": true,
+      "notes": "This node performs server-side validation and normalization before any storage or AI processing.\nKey decisions:\n• MIME-type validation prevents renamed or unsupported files from entering the system.\n• File size is capped (5MB) to protect OCR performance and API limits.\n• Candidate name is normalized and sanitized to produce deterministic, filesystem-safe storage paths.\n• Validation errors intentionally stop the workflow early to avoid wasted compute."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://svfsgwcrzqgsdxftnrhp.supabase.co/storage/v1/object/cv_uploads/{{ $('CV Validation').item.json.storage_path }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "CV_Upload",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        448,
+        -464
+      ],
+      "id": "e492a389-a45f-474d-a705-f8c8783a9a05",
+      "name": "Supabase CV storage Bucket",
+      "credentials": {
+        "supabaseApi": {
+          "id": "BweL2KRK6ukhF5FF",
+          "name": "Supabase account"
+        }
+      },
+      "notes": "Purpose: Persist uploaded CVs for traceability and reprocessing.\n\nKey decisions:\n• CVs are stored before AI matching to ensure no data loss if downstream steps fail.\n• Date-based folders + normalized filenames enable easy auditing and retrieval.\n• Supabase was chosen for its simple API, free tier, and compatibility with binary uploads."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an AI matching agent operating inside a workflow with external tools enabled.\n\nYou are given three distinct inputs, and you must treat them exactly as described.\n\nInputs\n1. Candidate Metadata (JSON)\n\nThis JSON contains only metadata, not CV content. It includes:\n\nFirst name: {{ $('CV Validation').item.json['First Name'] }}\n\nSurname: {{ $('CV Validation').item.json.Surname }}\n\nEmail: {{ $('CV Validation').item.json.Email }}\n\nStorage path: {{ $('CV Validation').item.json.storage_path }}\n\n⚠️ This JSON does not contain skills, experience, education, or role history.\nYou must not infer or assume any professional details from this JSON.\n\n2. CV File (Binary / Extracted Text)\n\nInput: {{ $json.extractedText }}\n\nSource: Uploaded CV file (PDF or DOCX)\n\nYou must:\n\nRead and rely only on this extracted CV text to determine skills, experience, and qualifications.\n\nIf required information is not present in the CV text, treat it as missing. Do not guess.\n\n3. Open Roles (Airtable Tool)\n\nYou have access to an Airtable tool that returns open roles only.\nEach role includes:\n\nRole Name\n\nDepartment\n\nRequired Skills (array of strings)\n\nMinimum Experience (years)\n\nLocation\n\nJob Description\n\nSeniority Level\n\nYou must retrieve role data exclusively via the Airtable tool.\nDo not invent roles or reuse cached knowledge.\n\nMandatory Rules (No Exceptions)\n\nYou must use tools to read:\n\nCV content (from extracted text)\n\nOpen roles (from Airtable)\n\nIf a tool has not returned data, you must not proceed as if it has.\n\nIf information is missing, return a result that reflects missing data instead of guessing.\n\nDo not hallucinate skills, experience, or roles.\n\nDo not assume seniority, years of experience, or role fit unless explicitly stated in the CV text.\n\nTask\n\n1. Extract skills and years of experience from the CV text.\n\n2. For each Airtable role, compute a match score:\n\nSkill match % =\n(number of matching skills ÷ total required skills) × 100\n\nIf candidate experience is below the role’s minimum, reduce the score proportionally.\n\n3. Select only the single highest-scoring role.\n\n4. Determine match status:\n\n    matched → at least one role evaluated and a best match selected\n\n    no_match → roles exist but none meet a reasonable match threshold or airtable returned zero roles\n\n5. Do not return secondary matches or explanations.\n\nOutput (Strict)\n\nReturn only valid JSON in the exact structure below.\nNo commentary, no markdown, no extra keys.\n\n{\n  \"candidate\": {\n    \"full_name\": \"string\",\n    \"email\": \"string\"\n  },\n  \"match\": {\n    \"role\": \"string or null\",\n    \"match_score\": \"number or null\",\n    \"status\": \"matched | no_match\"\n  }\n}",
+        "hasOutputParser": true,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        728,
+        -272
+      ],
+      "id": "d4a04af1-1572-4ab1-9339-d32520159273",
+      "name": "AI Agent",
+      "notes": "Purpose: Analyze CV text against open roles and return a single best match.\n\nKey decisions:\n• Candidate metadata is treated as non-professional context and explicitly excluded from skill inference.\n• Open roles must be retrieved via the Airtable tool to prevent hallucinated positions.\n• The agent is instructed to return strict JSON only to ensure deterministic downstream logic.\n• Missing information is handled explicitly rather than inferred, prioritizing accuracy over optimism."
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "base": {
+          "__rl": true,
+          "value": "appKMlTYULxZS7aSo",
+          "mode": "list",
+          "cachedResultName": "Open_Roles",
+          "cachedResultUrl": "https://airtable.com/appKMlTYULxZS7aSo"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl1XgvcFPdlO383p",
+          "mode": "list",
+          "cachedResultName": "Roles",
+          "cachedResultUrl": "https://airtable.com/appKMlTYULxZS7aSo/tbl1XgvcFPdlO383p"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtableTool",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        -48
+      ],
+      "id": "017eff3c-f314-4f76-9462-35fbb3e9cab4",
+      "name": "Open Roles DB",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "nuWjVRnKdCQvhISs",
+          "name": "Airtable Personal Access Token account"
+        }
+      },
+      "notes": "Purpose: Serve as the single source of truth for open positions.\n\nKey decisions:\n• Roles are stored in a structured schema (skills, experience, seniority) to support AI evaluation.\n• Access is restricted to a tool call so the AI cannot invent or reuse cached role data.\n• This design allows roles to be updated independently without modifying the workflow."
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"candidate\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"full_name\": { \"type\": \"string\" },\n        \"email\": { \"type\": \"string\" }\n      },\n      \"required\": [\"full_name\", \"email\"]\n    },\n    \"match\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"role\": { \"type\": [\"string\", \"null\"] },\n        \"match_score\": { \"type\": [\"number\", \"null\"] },\n        \"status\": {\n          \"type\": \"string\",\n          \"enum\": [\"matched\", \"no_open_roles\", \"no_match\"]\n        }\n      },\n      \"required\": [\"role\", \"status\"]\n    }\n  },\n  \"required\": [\"candidate\", \"match\"]\n}\n"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        928,
+        -48
+      ],
+      "id": "3c28b4ba-2b53-47e6-819d-7d81eb5c34eb",
+      "name": "SO Parser",
+      "notes": "Purpose: Enforce a strict JSON contract on AI responses.\n\nKey decisions:\n• Ensures downstream nodes receive predictable, typed data.\n• Prevents free-text responses from breaking conditional logic.\n• Acts as a safety layer between probabilistic AI output and deterministic automation."
+    },
+    {
+      "parameters": {
+        "model": "mistral-medium-latest",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        672,
+        -48
+      ],
+      "id": "368cc916-f6e1-443b-92dd-c3213a58706e",
+      "name": "Mistral ",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "qXpXqR6VvHqNXiqf",
+          "name": "Mistral credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "binaryProperty": "CV_Upload",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mistralAi",
+      "typeVersion": 1,
+      "position": [
+        448,
+        -272
+      ],
+      "id": "4024cfaa-8dc7-4045-af9d-6abf851664e3",
+      "name": "OCR/CV parsing",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "qXpXqR6VvHqNXiqf",
+          "name": "Mistral credential"
+        }
+      },
+      "notes": "Purpose: Convert uploaded CV files into plain text for AI analysis.\n\nKey decisions:\n• OCR/parsing is isolated from matching logic to keep responsibilities clear.\n• Only extracted CV text is passed forward — no assumptions are made from metadata.\n• Using Mistral avoids reliance on OpenAI while staying within free-tier constraints."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "54dd3a2a-9160-4e88-a50f-f95dab78c282",
+              "leftValue": "={{ $json.output.match.status }}",
+              "rightValue": "matched",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "fcfb87bb-16fc-4778-92d6-f3b4d50d4337",
+              "leftValue": "={{ $json.output.match.match_score }}",
+              "rightValue": 75,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1136,
+        -272
+      ],
+      "id": "777ead71-4dcf-43a5-bba6-752ebb49f20f",
+      "name": "Candidate matched?",
+      "notes": "Purpose: Apply business rules to AI-generated match results.\n\nKey decisions:\n• A minimum match score threshold (≥75%) is enforced at the workflow level rather than inside the AI.\n• This keeps business policy separate from AI reasoning and allows easy adjustment without prompt changes.\n• Both status and score must pass to qualify a candidate as “matched.”"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('CV Validation').item.json.Email }}",
+        "subject": "Update on Your Application",
+        "emailType": "text",
+        "message": "=Hi {{ $('CV Validation').item.json['First Name'] }},  \n\nThank you for taking the time to apply and for sharing your CV with us.  \n\nAt the moment, we don’t have any open roles that align with your background. This isn’t a reflection of your experience or qualifications, just the current availability on our side.  \n\nWe’ll keep your details on file and reach out if a suitable opportunity opens up. We appreciate your interest and wish you all the best in your ongoing search.  \n\nWarm regards, \nRecruitment at company XYZ",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1360,
+        -176
+      ],
+      "id": "ab9603e2-f451-45c7-ad41-1bae17bc70af",
+      "name": "Send 'No current opening' message",
+      "webhookId": "0b823b99-fd7d-416e-b83a-3fd2e851e320",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "uUoKr5eC0Zce0Ei6",
+          "name": "Gmail account"
+        }
+      },
+      "notes": "Purpose: Provide timely and respectful feedback to unmatched applicants.\n\nKey decisions:\n• Messaging is polite and non-rejecting to preserve employer brand.\n• Sent automatically to ensure no candidate is left without a response.\n• This path covers both low match scores and lack of suitable open roles."
+    },
+    {
+      "parameters": {
+        "tableId": "cv_submissions",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "first_name",
+              "fieldValue": "={{ $('CV Validation').item.json['First Name'] }}"
+            },
+            {
+              "fieldId": "last_name",
+              "fieldValue": "={{ $('CV Validation').item.json.Surname }}"
+            },
+            {
+              "fieldId": "email",
+              "fieldValue": "={{ $('CV Validation').item.json.Email }}"
+            },
+            {
+              "fieldId": "file_path",
+              "fieldValue": "={{ $('CV Validation').item.json.storage_path }}"
+            },
+            {
+              "fieldId": "uploaded_at",
+              "fieldValue": "={{ $('CV Validation').item.json.submittedAt }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        -368
+      ],
+      "id": "922d55e9-3b9e-4df9-98d4-eb98b1fbeeed",
+      "name": "Save matched candidate info to supabase table",
+      "notesInFlow": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "BweL2KRK6ukhF5FF",
+          "name": "Supabase account"
+        }
+      },
+      "notes": "Purpose: Persist matched candidate data for tracking and review.\n\nKey decisions:\n• Only candidates who pass the matching criteria are stored.\n• Stored data includes references to the original CV file for future audits.\n• This table can later support analytics, reporting, or manual review workflows."
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "# matched-candidates",
+          "mode": "name"
+        },
+        "text": "=A new candidate has been matched to an open role:  \n\nCandidate: {{ $('Candidate matched?').item.json.output.candidate.full_name }}\nEmail:  {{ $('Candidate matched?').item.json.output.candidate.email }}\nMatched Role: {{ $('Candidate matched?').item.json.output.match.role }} \nMatch Score: {{ $('Candidate matched?').item.json.output.match.match_score }}%\n\n:mag_right: Please review and take the next steps:",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        1584,
+        -368
+      ],
+      "id": "38b01980-344d-4eca-92bb-74db02e93143",
+      "name": "Send details to HR",
+      "webhookId": "93e1826c-50b9-4b21-806f-d8d47d29621b",
+      "credentials": {
+        "slackApi": {
+          "id": "Gbo9WrpaIYjxtXzX",
+          "name": "Slack account"
+        }
+      },
+      "notes": "Purpose: Notify HR immediately when a strong candidate match is found.\n\nKey decisions:\n• Slack is used for fast, asynchronous internal communication.\n• Only essential information is included to avoid exposing unnecessary personal data.\n• Human review is intentionally kept in the loop before any hiring action."
+    },
+    {
+      "parameters": {
+        "content": "Server-side validation in this node is mandatory because frontend validation can be bypassed (malicious requests, API calls, or misconfigured clients).\n\nThis second validation layer protects downstream systems (storage, OCR, AI) from invalid, oversized, or disguised files and ensures the workflow fails fast and safely.",
+        "height": 336,
+        "width": 528
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -112,
+        -528
+      ],
+      "typeVersion": 1,
+      "id": "b03774e8-500c-4afd-9202-75983507a5ab",
+      "name": "Sticky Note"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "CV Submission Form": {
+      "main": [
+        [
+          {
+            "node": "CV Validation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CV Validation": {
+      "main": [
+        [
+          {
+            "node": "OCR/CV parsing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Supabase CV storage Bucket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase CV storage Bucket": {
+      "main": [
+        []
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Candidate matched?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Open Roles DB": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SO Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral ": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OCR/CV parsing": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Candidate matched?": {
+      "main": [
+        [
+          {
+            "node": "Save matched candidate info to supabase table",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send 'No current opening' message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save matched candidate info to supabase table": {
+      "main": [
+        [
+          {
+            "node": "Send details to HR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "d66f0e1c-66a5-4b35-8a96-39c73797b3e8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f7703d283e7a3bee4aa790b8172f7d0fb1afe622423416593648ea71e5a117f6"
+  },
+  "id": "bl7AiVmNWpjUER9W",
+  "tags": []
+}
